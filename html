@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Serial Monitor</title>
+
+<style>
+body {
+  font-family: Helvetica;
+  background: #f5f7fb;
+  margin: 0;
+  padding: 20px;
+}
+
+.card {
+  background: white;
+  padding: 20px;
+  border-radius: 16px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+}
+
+button {
+  width: 100%;
+  font-size: 26px;
+  padding: 14px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  border: none;
+}
+
+.primary { background:#2563eb; color:white; }
+.danger { background:#ef4444; color:white; }
+
+#status {
+  font-size: 20px;
+  margin-bottom: 10px;
+}
+
+#output {
+  font-size: 20px;
+  height: 400px;
+  overflow-y: scroll;
+  background: black;
+  color: #00ff88;
+  padding: 10px;
+  border-radius: 12px;
+  white-space: pre-wrap;
+}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+  <div id="status">Disconnected</div>
+
+  <button class="primary" onclick="connect()">Connect</button>
+  <button class="danger" onclick="clearOutput()">Clear</button>
+
+  <div id="output"></div>
+</div>
+
+<script>
+let port;
+let reader;
+let buffer = "";
+let decoder = new TextDecoder("utf-8");
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+
+    document.getElementById("status").textContent = "Connected";
+
+    reader = port.readable.getReader();
+    readLoop();
+
+  } catch (err) {
+    document.getElementById("status").textContent = "Error";
+    console.error(err);
+  }
+}
+
+async function readLoop() {
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    // Decode raw bytes safely
+    let chunk = decoder.decode(value, { stream: true });
+
+    // Append to buffer
+    buffer += chunk;
+
+    // Process full lines only
+    let index;
+    while ((index = buffer.indexOf("\n")) >= 0) {
+
+      let line = buffer.slice(0, index);
+      buffer = buffer.slice(index + 1);
+
+      line = clean(line);
+
+      if (line.length > 0) {
+        appendLine(line);
+      }
+    }
+  }
+}
+
+function clean(line) {
+  return line
+    .replace(/\r/g, "")
+    .replace(/[^\x20-\x7E]/g, "")  // remove junk chars
+    .trim();
+}
+
+function appendLine(line) {
+  const output = document.getElementById("output");
+
+  output.textContent += line + "\n";
+  output.scrollTop = output.scrollHeight;
+}
+
+function clearOutput() {
+  document.getElementById("output").textContent = "";
+}
+</script>
+
+</body>
+</html>
