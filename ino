@@ -5,15 +5,50 @@
 #define UART2_RX 16
 #define BAUD 9600
 
-#define ON_TIME_MS 5000
+#define TRAP_PIN 23        // external interrupt (LOW = triggered)
+#define VBAT_PIN 36        // VP pin (ADC)
+
 #define RADIO_BOOT_DELAY_MS 2000
 #define POST_TX_DELAY_MS 1000
 #define TX_RETRIES 3
 
-#define SLEEP_TIME_S 5
+#define HEARTBEAT_INTERVAL_MIN 10
+#define TRAP_COOLDOWN_MIN 5
 
-// ================= PERSISTENT COUNTER =================
-RTC_DATA_ATTR uint32_t counter = 0;
+// ================= PERSISTENT STORAGE =================
+RTC_DATA_ATTR uint32_t bootCount = 0;
+RTC_DATA_ATTR uint64_t lastTrapTime = 0;   // microseconds since boot (RTC time)
+
+// ================= HELPERS =================
+
+// read battery voltage (simple scaled ADC)
+float readVoltage() {
+  int raw = analogRead(VBAT_PIN);
+
+  // adjust scaling if using divider (example assumes 2:1 divider)
+  float voltage = (raw / 4095.0) * 3.3 * 2.0;
+
+  return voltage;
+}
+
+void powerRadio(bool state) {
+  digitalWrite(RADIO_POWER_PIN, state ? HIGH : LOW);
+}
+
+// send message reliably
+void sendMessage(String msg) {
+
+  powerRadio(true);
+  delay(RADIO_BOOT_DELAY_MS);
+
+  for (int i = 0; i < TX_RETRIES; i++) {
+    Serial2.println(msg);
+    delay(200);
+  }
+
+  delay(POST_TX_DELAY_MS);
+  powerRadio(false);
+}
 
 // ================= SETUP =================
 void setup() {
@@ -22,48 +57,73 @@ void setup() {
   Serial2.begin(BAUD, SERIAL_8N1, UART2_RX, UART2_TX);
 
   pinMode(RADIO_POWER_PIN, OUTPUT);
+  pinMode(TRAP_PIN, INPUT_PULLUP);
 
-  // ===== Boot info =====
-  counter++;
+  bootCount++;
+
+  esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
 
   Serial.println("\n====================");
-  Serial.println("ESP32 WAKE");
-  Serial.print("Counter: ");
-  Serial.println(counter);
+  Serial.print("Boot #: "); Serial.println(bootCount);
+  Serial.print("Wake reason: "); Serial.println(wakeReason);
 
-  // ================= POWER RADIO =================
-  Serial.println("Powering radio ON...");
-  digitalWrite(RADIO_POWER_PIN, HIGH);
+  uint64_t now = esp_timer_get_time(); // microseconds since boot
 
-  delay(RADIO_BOOT_DELAY_MS);   // allow radio to initialise
+  // ================= TRAP TRIGGER =================
+  if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
 
-  // ================= TRANSMIT =================
-  Serial.println("Transmitting...");
+    Serial.println("Trap triggered!");
 
-  for (int i = 0; i < TX_RETRIES; i++) {
+    // enforce cooldown (5 min)
+    if ((now - lastTrapTime) > (uint64_t)TRAP_COOLDOWN_MIN * 60 * 1000000ULL) {
 
-    Serial.print("TX attempt ");
-    Serial.println(i + 1);
+      lastTrapTime = now;
 
-    Serial2.print("COUNT:");
-    Serial2.print(counter);
-    Serial2.print("\r\n");
+      float v = readVoltage();
 
-    delay(200);  // spacing between packets
+      String msg = "TRAP,COUNT:";
+      msg += String(bootCount);
+      msg += ",V:";
+      msg += String(v, 2);
+
+      sendMessage(msg);
+
+      Serial.println("Trap message sent");
+
+    } else {
+      Serial.println("Trap ignored (cooldown)");
+    }
   }
 
-  delay(POST_TX_DELAY_MS);  // ensure full transmission
+  // ================= HEARTBEAT =================
+  else if (wakeReason == ESP_SLEEP_WAKEUP_TIMER || wakeReason == ESP_SLEEP_WAKEUP_UNDEFINED) {
 
-  // ================= POWER RADIO OFF =================
-  Serial.println("Powering radio OFF...");
-  digitalWrite(RADIO_POWER_PIN, LOW);
+    Serial.println("Heartbeat wake");
 
-  // ================= SLEEP =================
-  Serial.println("Entering deep sleep...");
+    float v = readVoltage();
 
-  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_TIME_S * 1000000ULL);
+    String msg = "ALIVE,COUNT:";
+    msg += String(bootCount);
+    msg += ",V:";
+    msg += String(v, 2);
 
-  delay(200); // allow serial to flush
+    sendMessage(msg);
+
+    Serial.println("Heartbeat sent");
+  }
+
+  // ================= GO BACK TO SLEEP =================
+  Serial.println("Going to sleep...");
+
+  // Wake on trap (LOW)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)TRAP_PIN, 0);
+
+  // Wake on timer (10 min)
+  esp_sleep_enable_timer_wakeup(
+    (uint64_t)HEARTBEAT_INTERVAL_MIN * 60 * 1000000ULL
+  );
+
+  delay(200);
   esp_deep_sleep_start();
 }
 
