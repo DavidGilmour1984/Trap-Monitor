@@ -1,91 +1,71 @@
 // ================= CONFIG =================
-#define TRIGGER_PIN 15
-#define RADIO_M0    4
-#define RADIO_M1    5
-#define VP_PIN      36
+#define RADIO_POWER_PIN 4
 
-#define RXD2 16
-#define TXD2 17
+#define UART2_TX 17
+#define UART2_RX 16
+#define BAUD 9600
 
-#define TRAP_ID "Trap 001"
+#define ON_TIME_MS 5000
+#define RADIO_BOOT_DELAY_MS 2000
+#define POST_TX_DELAY_MS 1000
+#define TX_RETRIES 3
 
-// ================= RTC MEMORY =================
-RTC_DATA_ATTR uint32_t minuteCounter = 0;
-RTC_DATA_ATTR uint32_t lastTriggerSend = 0;  // last minute we sent trigger
+#define SLEEP_TIME_S 5
+
+// ================= PERSISTENT COUNTER =================
+RTC_DATA_ATTR uint32_t counter = 0;
 
 // ================= SETUP =================
 void setup() {
+
   Serial.begin(9600);
-  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  Serial2.begin(BAUD, SERIAL_8N1, UART2_RX, UART2_TX);
 
-  delay(100);
+  pinMode(RADIO_POWER_PIN, OUTPUT);
 
-  pinMode(TRIGGER_PIN, INPUT_PULLUP);
-  pinMode(RADIO_M0, OUTPUT);
-  pinMode(RADIO_M1, OUTPUT);
+  // ===== Boot info =====
+  counter++;
 
-  // Increment "time" (1 count per minute wake)
-  minuteCounter++;
+  Serial.println("\n====================");
+  Serial.println("ESP32 WAKE");
+  Serial.print("Counter: ");
+  Serial.println(counter);
 
-  bool triggered = (digitalRead(TRIGGER_PIN) == HIGH);  // <-- YOUR LOGIC: HIGH = triggered
+  // ================= POWER RADIO =================
+  Serial.println("Powering radio ON...");
+  digitalWrite(RADIO_POWER_PIN, HIGH);
 
-  // ---- WAKE RADIO ----
-  radioWake();
-  delay(100);
+  delay(RADIO_BOOT_DELAY_MS);   // allow radio to initialise
 
-  // =====================================================
-  // ================= TRIGGER SEND (MAX 1/MIN) ===========
-  // =====================================================
-  if (triggered && (minuteCounter - lastTriggerSend >= 1)) {
+  // ================= TRANSMIT =================
+  Serial.println("Transmitting...");
 
-    Serial.println("DEBUG: Sending Trigger");
+  for (int i = 0; i < TX_RETRIES; i++) {
 
-    Serial2.print(TRAP_ID);
-    Serial2.println(" Triggered");
+    Serial.print("TX attempt ");
+    Serial.println(i + 1);
 
-    delay(200);
+    Serial2.print("COUNT:");
+    Serial2.print(counter);
+    Serial2.print("\r\n");
 
-    lastTriggerSend = minuteCounter;
+    delay(200);  // spacing between packets
   }
 
-  // =====================================================
-  // ================= VOLTAGE EVERY 5 MIN ===============
-  // =====================================================
-  if (minuteCounter % 5 == 0) {
+  delay(POST_TX_DELAY_MS);  // ensure full transmission
 
-    int raw = analogRead(VP_PIN);
-    float voltage = raw * (3.3 / 4095.0) * 2.0;
+  // ================= POWER RADIO OFF =================
+  Serial.println("Powering radio OFF...");
+  digitalWrite(RADIO_POWER_PIN, LOW);
 
-    Serial.print("Voltage: ");
-    Serial.println(voltage, 2);
+  // ================= SLEEP =================
+  Serial.println("Entering deep sleep...");
 
-    Serial2.print("Voltage:");
-    Serial2.println(voltage, 2);
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_TIME_S * 1000000ULL);
 
-    delay(200);
-  }
-
-  // ---- SLEEP RADIO ----
-  radioSleep();
-
-  // =====================================================
-  // ================= SLEEP ==============================
-  // =====================================================
-  esp_sleep_enable_timer_wakeup(60ULL * 1000000ULL); // 1 min wake
+  delay(200); // allow serial to flush
   esp_deep_sleep_start();
 }
 
 // ================= LOOP =================
 void loop() {}
-
-
-// ================= RADIO CONTROL =================
-void radioWake() {
-  digitalWrite(RADIO_M0, LOW);
-  digitalWrite(RADIO_M1, LOW);
-}
-
-void radioSleep() {
-  digitalWrite(RADIO_M0, HIGH);
-  digitalWrite(RADIO_M1, HIGH);
-}
