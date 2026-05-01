@@ -16,7 +16,7 @@
 #define VBAT_ADC   1   // PB2
 
 #define TX_RETRIES 3
-#define WDT_CYCLES 8   // ~64s (~1 min)
+#define WDT_CYCLES 1   // ~64s (~1 min)
 
 // ================= GLOBALS =================
 volatile uint8_t wdtCounter = 0;
