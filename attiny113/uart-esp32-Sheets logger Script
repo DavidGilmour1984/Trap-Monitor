@@ -1,0 +1,65 @@
+// ================= CONFIG =================
+const SPREADSHEET_ID = "1a53vI6l5CiVRt9T1DKy4--scPTcP9nWM5JpLskQyAMg";
+const DATA_SHEET = "Data";
+const STATUS_SHEET = "Status";
+
+// ================= ENSURE SHEETS EXIST =================
+function ensureSheets() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // Create Data sheet if missing
+  let dataSheet = ss.getSheetByName(DATA_SHEET);
+  if (!dataSheet) {
+    dataSheet = ss.insertSheet(DATA_SHEET);
+    dataSheet.appendRow(["Timestamp", "Message"]);
+  }
+  
+  // Create Status sheet if missing
+  let statusSheet = ss.getSheetByName(STATUS_SHEET);
+  if (!statusSheet) {
+    statusSheet = ss.insertSheet(STATUS_SHEET);
+    statusSheet.appendRow(["Last Contact", "Status"]);
+    statusSheet.appendRow(["", ""]);
+  }
+}
+
+// ================= DO_GET ENDPOINT =================
+function doGet(e) {
+  const type = e.parameter.type || "";
+  const data = e.parameter.data || "";
+  const callback = e.parameter.callback || "callback";
+  
+  let response = { success: false, message: "" };
+  
+  try {
+    ensureSheets();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    
+    if (type === "log") {
+      // ===== LOG DATA =====
+      const dataSheet = ss.getSheetByName(DATA_SHEET);
+      const timestamp = new Date().toISOString();
+      dataSheet.appendRow([timestamp, data]);
+      response.success = true;
+      response.message = "Data logged";
+      
+    } else if (type === "status") {
+      // ===== SIGN OF LIFE =====
+      const statusSheet = ss.getSheetByName(STATUS_SHEET);
+      const timestamp = new Date().toISOString();
+      statusSheet.getRange(2, 1).setValue(timestamp);
+      statusSheet.getRange(2, 2).setValue("Online");
+      response.success = true;
+      response.message = "Status updated";
+      
+    } else {
+      response.message = "Unknown type";
+    }
+  } catch (error) {
+    response.message = "Error: " + error.toString();
+  }
+  
+  return ContentService.createTextOutput(
+    callback + "(" + JSON.stringify(response) + ");"
+  ).setMimeType(ContentService.MimeType.JAVASCRIPT);
+}
