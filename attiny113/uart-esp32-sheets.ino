@@ -6,8 +6,8 @@
 #include <HTTPClient.h>
 
 // ================= WIFI CONFIG =================
-const char* ssid = "StPeters-PSK";
-const char* password = "4OddDevices";
+const char* ssid = "";
+const char* password = "";
 const char* scriptURL = "https://script.google.com/macros/s/AKfycbyU1M2sU_9DnGU3o2FY5jMvl5DK1ZMy7NqgRv9iOBJZJeY12tylTrnuCzskVUp1Y0OLrA/exec";
 
 // ================= OLED =================
@@ -34,6 +34,9 @@ unsigned long lastDataLog = 0;
 unsigned long lastStatusUpdate = 0;
 uint32_t totalMessages = 0;
 unsigned long timeSinceLastContact = 0;
+String pendingLogData = "";
+unsigned long logAttemptTime = 0;
+bool isLoggingData = false;
 
 // ================= SETUP =================
 void setup() {
@@ -101,6 +104,9 @@ void loop() {
         lastMessage = currentLine;
         totalMessages++;
         lastMessageTime = millis();
+        pendingLogData = currentLine;
+        logAttemptTime = millis();
+        isLoggingData = true;
         updateDisplay();
       }
       currentLine = "";
@@ -109,11 +115,13 @@ void loop() {
     }
   }
   
-  // ================= DATA LOG (30 MINUTES) =================
-  if (millis() - lastDataLog >= DATA_LOG_INTERVAL) {
-    lastDataLog = millis();
-    if (WiFi.status() == WL_CONNECTED && lastMessage.length() > 0) {
-      logDataToSheet(lastMessage);
+  // ================= DATA LOG (30 MINUTES) - ASYNC =================
+  if (isLoggingData && WiFi.status() == WL_CONNECTED && pendingLogData.length() > 0) {
+    if (millis() - logAttemptTime > 100) {
+      logDataToSheet(pendingLogData);
+      pendingLogData = "";
+      isLoggingData = false;
+      lastDataLog = millis();
     }
   }
   
@@ -132,7 +140,7 @@ void loop() {
   }
 }
 
-// ================= LOG DATA TO SPREADSHEET =================
+// ================= LOG DATA TO SPREADSHEET (NON-BLOCKING) =================
 void logDataToSheet(String dataLine) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[LOG] WiFi not connected");
@@ -142,15 +150,21 @@ void logDataToSheet(String dataLine) {
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
+  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=log&data=" + urlEncode(dataLine);
   
   Serial.println("[LOG] Sending: " + dataLine);
   
   if (http.begin(client, url)) {
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     int httpCode = http.GET();
     if (httpCode == 200) {
-      Serial.println("[LOG] Success");
+      Serial.println("[LOG] Success HTTP 200");
+    } else if (httpCode == 302 || httpCode == 301) {
+      Serial.println("[LOG] Redirect " + String(httpCode) + " - check deployment URL");
     } else {
       Serial.println("[LOG] HTTP Error: " + String(httpCode));
     }
@@ -158,6 +172,7 @@ void logDataToSheet(String dataLine) {
   } else {
     Serial.println("[LOG] Connection failed");
   }
+  client.stop();
 }
 
 // ================= SEND HEARTBEAT (SIGN OF LIFE) =================
@@ -169,16 +184,21 @@ void sendHeartbeat() {
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
+  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=status";
   
   if (http.begin(client, url)) {
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     int httpCode = http.GET();
     Serial.println("[HEARTBEAT] HTTP " + String(httpCode));
     http.end();
   } else {
     Serial.println("[HEARTBEAT] Connection failed");
   }
+  client.stop();
 }
 
 // ================= URL ENCODE =================
