@@ -2,25 +2,56 @@
 const SPREADSHEET_ID = "1a53vI6l5CiVRt9T1DKy4--scPTcP9nWM5JpLskQyAMg";
 const DATA_SHEET = "Data";
 const STATUS_SHEET = "Status";
+const NZ_TIMEZONE = "Pacific/Auckland";
 
 // ================= ENSURE SHEETS EXIST =================
 function ensureSheets() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  
-  // Create Data sheet if missing
-  let dataSheet = ss.getSheetByName(DATA_SHEET);
-  if (!dataSheet) {
-    dataSheet = ss.insertSheet(DATA_SHEET);
-    dataSheet.appendRow(["Timestamp", "Message"]);
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    
+    let dataSheet = ss.getSheetByName(DATA_SHEET);
+    if (!dataSheet) {
+      dataSheet = ss.insertSheet(DATA_SHEET);
+      dataSheet.appendRow(["Timestamp (NZ)", "Message"]);
+    }
+    
+    let statusSheet = ss.getSheetByName(STATUS_SHEET);
+    if (!statusSheet) {
+      statusSheet = ss.insertSheet(STATUS_SHEET);
+      statusSheet.appendRow(["Last Contact (NZ)", "Status", "Contact Type"]);
+      statusSheet.appendRow([getNZTimestamp(), "Initialized", "Script Deployed"]);
+    }
+  } catch (error) {
+    Logger.log("ensureSheets error: " + error);
   }
+}
+
+// ================= GET NZ FORMATTED TIMESTAMP =================
+function getNZTimestamp() {
+  const now = new Date();
+  const formatter = Intl.DateTimeFormat("en-NZ", {
+    timeZone: NZ_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
   
-  // Create Status sheet if missing
-  let statusSheet = ss.getSheetByName(STATUS_SHEET);
-  if (!statusSheet) {
-    statusSheet = ss.insertSheet(STATUS_SHEET);
-    statusSheet.appendRow(["Last Contact", "Status"]);
-    statusSheet.appendRow(["", ""]);
-  }
+  // Intl.DateTimeFormat returns parts, so format manually for clarity
+  const nzDate = new Date(now.toLocaleString("en-US", { timeZone: NZ_TIMEZONE }));
+  
+  // Return as ISO-style but with NZ time: YYYY-MM-DD HH:MM:SS
+  const year = nzDate.getFullYear();
+  const month = String(nzDate.getMonth() + 1).padStart(2, "0");
+  const day = String(nzDate.getDate()).padStart(2, "0");
+  const hours = String(nzDate.getHours()).padStart(2, "0");
+  const minutes = String(nzDate.getMinutes()).padStart(2, "0");
+  const seconds = String(nzDate.getSeconds()).padStart(2, "0");
+  
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 // ================= DO_GET ENDPOINT =================
@@ -38,25 +69,32 @@ function doGet(e) {
     if (type === "log") {
       // ===== LOG DATA =====
       const dataSheet = ss.getSheetByName(DATA_SHEET);
-      const timestamp = new Date().toISOString();
+      const timestamp = getNZTimestamp();
       dataSheet.appendRow([timestamp, data]);
       response.success = true;
-      response.message = "Data logged";
+      response.message = "Data logged (" + timestamp + ")";
+      Logger.log("[LOG] " + timestamp + " | " + data);
       
     } else if (type === "status") {
-      // ===== SIGN OF LIFE =====
+      // ===== HEARTBEAT / SIGN OF LIFE =====
       const statusSheet = ss.getSheetByName(STATUS_SHEET);
-      const timestamp = new Date().toISOString();
+      const timestamp = getNZTimestamp();
+      
+      // Update row 2 with latest contact timestamp and status
       statusSheet.getRange(2, 1).setValue(timestamp);
       statusSheet.getRange(2, 2).setValue("Online");
+      statusSheet.getRange(2, 3).setValue("Heartbeat");
+      
       response.success = true;
-      response.message = "Status updated";
+      response.message = "Status updated (" + timestamp + ")";
+      Logger.log("[HEARTBEAT] " + timestamp);
       
     } else {
-      response.message = "Unknown type";
+      response.message = "Unknown type: " + type;
     }
   } catch (error) {
     response.message = "Error: " + error.toString();
+    Logger.log("doGet error: " + error);
   }
   
   return ContentService.createTextOutput(
