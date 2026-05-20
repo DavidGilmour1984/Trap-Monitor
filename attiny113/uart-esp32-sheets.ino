@@ -22,32 +22,38 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BAUD 9600
 
 // ================= TIMINGS =================
-#define DATA_LOG_INTERVAL 1800000  // 30 minutes in ms
-#define STATUS_INTERVAL 30000      // 30 seconds in ms
+#define STATUS_INTERVAL 30000       // 30 seconds heartbeat
+#define DISPLAY_INTERVAL 1000       // 1 second display update
+#define LOG_TIMEOUT 3000            // 3 second timeout for HTTP
 
 // ================= VARIABLES =================
 String currentLine = "";
 String lastMessage = "";
 unsigned long lastMessageTime = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastDataLog = 0;
-unsigned long lastStatusUpdate = 0;
+unsigned long lastHeartbeatTime = 0;
+unsigned long lastSuccessfulContact = 0;
 uint32_t totalMessages = 0;
-unsigned long timeSinceLastContact = 0;
 String pendingLogData = "";
 unsigned long logAttemptTime = 0;
 bool isLoggingData = false;
+bool httpInProgress = false;
 
 // ================= SETUP =================
 void setup() {
   Serial.begin(9600);
+  delay(500);
   
   // UART2
   Serial2.begin(BAUD, SERIAL_8N1, UART2_RX, UART2_TX);
   
   // OLED
   Wire.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("SSD1306 allocation failed");
+    while (1);
+  }
+  
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
@@ -81,8 +87,9 @@ void setup() {
   delay(2000);
   
   lastMessageTime = millis();
-  lastDataLog = millis();
-  lastStatusUpdate = millis();
+  lastHeartbeatTime = millis();
+  lastSuccessfulContact = millis();
+  lastDisplayUpdate = millis();
 }
 
 // ================= LOOP =================
@@ -107,7 +114,7 @@ void loop() {
         pendingLogData = currentLine;
         logAttemptTime = millis();
         isLoggingData = true;
-        updateDisplay();
+        Serial.println("[RX] Message received: " + currentLine);
       }
       currentLine = "";
     } else if (c != '\r') {
@@ -115,90 +122,122 @@ void loop() {
     }
   }
   
-  // ================= DATA LOG (30 MINUTES) - ASYNC =================
-  if (isLoggingData && WiFi.status() == WL_CONNECTED && pendingLogData.length() > 0) {
+  // ================= LOG DATA (ASYNC, NON-BLOCKING) =================
+  if (isLoggingData && !httpInProgress && WiFi.status() == WL_CONNECTED && pendingLogData.length() > 0) {
     if (millis() - logAttemptTime > 100) {
       logDataToSheet(pendingLogData);
-      pendingLogData = "";
-      isLoggingData = false;
-      lastDataLog = millis();
     }
   }
   
-  // ================= SIGN OF LIFE (30 SECONDS) =================
-  if (millis() - lastStatusUpdate >= STATUS_INTERVAL) {
-    lastStatusUpdate = millis();
+  // ================= CHECK FOR HTTP TIMEOUT =================
+  if (httpInProgress && millis() - logAttemptTime > LOG_TIMEOUT) {
+    Serial.println("[LOG] HTTP timeout, abandoning request");
+    httpInProgress = false;
+    isLoggingData = false;
+    pendingLogData = "";
+  }
+  
+  // ================= HEARTBEAT (30 SECONDS) =================
+  if (millis() - lastHeartbeatTime >= STATUS_INTERVAL) {
+    lastHeartbeatTime = millis();
     if (WiFi.status() == WL_CONNECTED) {
       sendHeartbeat();
     }
   }
   
-  // ================= UPDATE DISPLAY TIMER (1 SECOND) =================
-  if (millis() - lastDisplayUpdate >= 1000) {
+  // ================= UPDATE DISPLAY (1 SECOND) =================
+  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL) {
     lastDisplayUpdate = millis();
     updateDisplay();
   }
 }
 
-// ================= LOG DATA TO SPREADSHEET (NON-BLOCKING) =================
+// ================= LOG DATA TO SPREADSHEET =================
 void logDataToSheet(String dataLine) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[LOG] WiFi not connected");
+    isLoggingData = false;
     return;
   }
+  
+  httpInProgress = true;
   
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
-  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=log&data=" + urlEncode(dataLine);
   
   Serial.println("[LOG] Sending: " + dataLine);
   
   if (http.begin(client, url)) {
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(2000);
+    http.setTimeout(3000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    
     int httpCode = http.GET();
+    
     if (httpCode == 200) {
       Serial.println("[LOG] Success HTTP 200");
+      lastSuccessfulContact = millis();
+      isLoggingData = false;
+      pendingLogData = "";
     } else if (httpCode == 302 || httpCode == 301) {
       Serial.println("[LOG] Redirect " + String(httpCode) + " - check deployment URL");
+      isLoggingData = false;
+      pendingLogData = "";
+    } else if (httpCode < 0) {
+      Serial.println("[LOG] HTTP Error: " + String(http.errorToString(httpCode)));
     } else {
       Serial.println("[LOG] HTTP Error: " + String(httpCode));
     }
+    
     http.end();
   } else {
     Serial.println("[LOG] Connection failed");
   }
+  
   client.stop();
+  httpInProgress = false;
 }
 
-// ================= SEND HEARTBEAT (SIGN OF LIFE) =================
+// ================= SEND HEARTBEAT =================
 void sendHeartbeat() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
   }
   
+  httpInProgress = true;
+  
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
-  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=status";
   
   if (http.begin(client, url)) {
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(2000);
+    http.setTimeout(3000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    
     int httpCode = http.GET();
-    Serial.println("[HEARTBEAT] HTTP " + String(httpCode));
+    
+    if (httpCode == 200) {
+      Serial.println("[HEARTBEAT] HTTP 200 OK");
+      lastSuccessfulContact = millis();
+    } else if (httpCode < 0) {
+      Serial.println("[HEARTBEAT] Error: " + String(http.errorToString(httpCode)));
+    } else {
+      Serial.println("[HEARTBEAT] HTTP " + String(httpCode));
+    }
+    
     http.end();
   } else {
     Serial.println("[HEARTBEAT] Connection failed");
   }
+  
   client.stop();
+  httpInProgress = false;
 }
 
 // ================= URL ENCODE =================
@@ -220,8 +259,8 @@ String urlEncode(String str) {
 
 // ================= OLED UPDATE =================
 void updateDisplay() {
-  unsigned long secondsSince = (millis() - lastMessageTime) / 1000;
-  unsigned long secondsSinceContact = (millis() - lastStatusUpdate) / 1000;
+  unsigned long secondsSinceLastMsg = (millis() - lastMessageTime) / 1000;
+  unsigned long secondsSinceContact = (millis() - lastSuccessfulContact) / 1000;
   
   display.clearDisplay();
   display.setTextSize(1);
@@ -233,21 +272,37 @@ void updateDisplay() {
   display.print(" | WiFi: ");
   display.println(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
   
+  // ===== LAST MESSAGE RX =====
   display.setCursor(0, 10);
   display.print("Last RX: ");
-  display.print(secondsSince);
+  display.print(secondsSinceLastMsg);
   display.println("s");
   
+  // ===== LAST SUCCESSFUL CONTACT (LOG OR STATUS) =====
   display.setCursor(0, 20);
-  display.print("Last Contact: ");
+  display.print("Last OK: ");
   display.print(secondsSinceContact);
   display.println("s");
   
-  // ===== MESSAGE =====
-  display.setCursor(0, 34);
+  // ===== HTTP STATUS =====
+  display.setCursor(0, 30);
+  if (httpInProgress) {
+    display.println("HTTP: BUSY...");
+  } else if (isLoggingData) {
+    display.println("HTTP: PENDING");
+  } else {
+    display.println("HTTP: IDLE");
+  }
+  
+  // ===== MESSAGE CONTENT =====
+  display.setCursor(0, 44);
   display.println("Last Msg:");
-  display.setCursor(0, 46);
-  display.println(lastMessage);
+  display.setCursor(0, 54);
+  String displayMsg = lastMessage;
+  if (displayMsg.length() > 20) {
+    displayMsg = displayMsg.substring(0, 20);
+  }
+  display.println(displayMsg);
   
   display.display();
 }
