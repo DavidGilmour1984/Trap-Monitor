@@ -24,7 +24,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // ================= TIMINGS =================
 #define STATUS_INTERVAL 30000       // 30 seconds heartbeat
 #define DISPLAY_INTERVAL 1000       // 1 second display update
-#define LOG_TIMEOUT 3000            // 3 second timeout for HTTP
+#define LOG_TIMEOUT 5000            // 5 second timeout for HTTP
 
 // ================= VARIABLES =================
 String currentLine = "";
@@ -114,7 +114,7 @@ void loop() {
         pendingLogData = currentLine;
         logAttemptTime = millis();
         isLoggingData = true;
-        Serial.println("[RX] Message received: " + currentLine);
+        Serial.println("[RX] Message queued for logging: " + currentLine);
       }
       currentLine = "";
     } else if (c != '\r') {
@@ -125,16 +125,17 @@ void loop() {
   // ================= LOG DATA (ASYNC, NON-BLOCKING) =================
   if (isLoggingData && !httpInProgress && WiFi.status() == WL_CONNECTED && pendingLogData.length() > 0) {
     if (millis() - logAttemptTime > 100) {
+      Serial.println("[LOG] Starting HTTP request...");
       logDataToSheet(pendingLogData);
+      pendingLogData = "";
     }
   }
   
   // ================= CHECK FOR HTTP TIMEOUT =================
   if (httpInProgress && millis() - logAttemptTime > LOG_TIMEOUT) {
-    Serial.println("[LOG] HTTP timeout, abandoning request");
+    Serial.println("[LOG] HTTP timeout, clearing flags");
     httpInProgress = false;
     isLoggingData = false;
-    pendingLogData = "";
   }
   
   // ================= HEARTBEAT (30 SECONDS) =================
@@ -155,7 +156,7 @@ void loop() {
 // ================= LOG DATA TO SPREADSHEET =================
 void logDataToSheet(String dataLine) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[LOG] WiFi not connected");
+    Serial.println("[LOG] WiFi not connected, abandoning");
     isLoggingData = false;
     return;
   }
@@ -165,40 +166,43 @@ void logDataToSheet(String dataLine) {
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
+  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=log&data=" + urlEncode(dataLine);
   
-  Serial.println("[LOG] Sending: " + dataLine);
+  Serial.println("[LOG] URL: " + url);
   
-  if (http.begin(client, url)) {
-    http.setConnectTimeout(2000);
-    http.setTimeout(3000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    
-    int httpCode = http.GET();
-    
-    if (httpCode == 200) {
-      Serial.println("[LOG] Success HTTP 200");
-      lastSuccessfulContact = millis();
-      isLoggingData = false;
-      pendingLogData = "";
-    } else if (httpCode == 302 || httpCode == 301) {
-      Serial.println("[LOG] Redirect " + String(httpCode) + " - check deployment URL");
-      isLoggingData = false;
-      pendingLogData = "";
-    } else if (httpCode < 0) {
-      Serial.println("[LOG] HTTP Error: " + String(http.errorToString(httpCode)));
-    } else {
-      Serial.println("[LOG] HTTP Error: " + String(httpCode));
-    }
-    
-    http.end();
-  } else {
-    Serial.println("[LOG] Connection failed");
+  if (!http.begin(client, url)) {
+    Serial.println("[LOG] http.begin() failed");
+    httpInProgress = false;
+    isLoggingData = false;
+    client.stop();
+    return;
   }
   
+  http.setConnectTimeout(2000);
+  http.setTimeout(5000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    Serial.println("[LOG] HTTP 200 OK - data logged");
+    lastSuccessfulContact = millis();
+  } else if (httpCode == 302 || httpCode == 301) {
+    Serial.println("[LOG] HTTP " + String(httpCode) + " redirect - check deployment URL");
+  } else if (httpCode < 0) {
+    Serial.println("[LOG] HTTP error: " + String(http.errorToString(httpCode)));
+  } else {
+    Serial.println("[LOG] HTTP " + String(httpCode));
+  }
+  
+  http.end();
   client.stop();
+  
+  // ALWAYS clear flags after HTTP completes
   httpInProgress = false;
+  isLoggingData = false;
 }
 
 // ================= SEND HEARTBEAT =================
@@ -207,37 +211,36 @@ void sendHeartbeat() {
     return;
   }
   
-  httpInProgress = true;
-  
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
+  client.setTimeout(5000);
   
   String url = String(scriptURL) + "?type=status";
   
-  if (http.begin(client, url)) {
-    http.setConnectTimeout(2000);
-    http.setTimeout(3000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    
-    int httpCode = http.GET();
-    
-    if (httpCode == 200) {
-      Serial.println("[HEARTBEAT] HTTP 200 OK");
-      lastSuccessfulContact = millis();
-    } else if (httpCode < 0) {
-      Serial.println("[HEARTBEAT] Error: " + String(http.errorToString(httpCode)));
-    } else {
-      Serial.println("[HEARTBEAT] HTTP " + String(httpCode));
-    }
-    
-    http.end();
-  } else {
-    Serial.println("[HEARTBEAT] Connection failed");
+  if (!http.begin(client, url)) {
+    Serial.println("[HEARTBEAT] http.begin() failed");
+    client.stop();
+    return;
   }
   
+  http.setConnectTimeout(2000);
+  http.setTimeout(5000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    Serial.println("[HEARTBEAT] HTTP 200 OK");
+    lastSuccessfulContact = millis();
+  } else if (httpCode < 0) {
+    Serial.println("[HEARTBEAT] Error: " + String(http.errorToString(httpCode)));
+  } else {
+    Serial.println("[HEARTBEAT] HTTP " + String(httpCode));
+  }
+  
+  http.end();
   client.stop();
-  httpInProgress = false;
 }
 
 // ================= URL ENCODE =================
@@ -278,7 +281,7 @@ void updateDisplay() {
   display.print(secondsSinceLastMsg);
   display.println("s");
   
-  // ===== LAST SUCCESSFUL CONTACT (LOG OR STATUS) =====
+  // ===== LAST SUCCESSFUL CONTACT =====
   display.setCursor(0, 20);
   display.print("Last OK: ");
   display.print(secondsSinceContact);
@@ -286,12 +289,13 @@ void updateDisplay() {
   
   // ===== HTTP STATUS =====
   display.setCursor(0, 30);
+  display.print("HTTP: ");
   if (httpInProgress) {
-    display.println("HTTP: BUSY...");
+    display.println("IN PROGRESS");
   } else if (isLoggingData) {
-    display.println("HTTP: PENDING");
+    display.println("PENDING");
   } else {
-    display.println("HTTP: IDLE");
+    display.println("IDLE");
   }
   
   // ===== MESSAGE CONTENT =====
